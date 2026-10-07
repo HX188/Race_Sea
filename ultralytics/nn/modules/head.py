@@ -16,6 +16,8 @@ from ultralytics.utils.torch_utils import TORCH_1_11, fuse_conv_and_bn, smart_in
 
 from .block import DFL, SAVPE, BNContrastiveHead, ContrastiveHead, Proto, Proto26, RealNVP, Residual, SwiGLUFFN
 from .conv import Conv, DWConv
+from .foreground_enhance import ForegroundDetailEnhancer
+from .hbs_masks import exact_obb_cell_overlap_mask
 from .transformer import MLP, DeformableTransformerDecoder, DeformableTransformerDecoderLayer
 from .utils import bias_init_with_prob, linear_init
 
@@ -61,7 +63,7 @@ class StripRegBlock(nn.Module):
 class HBSBlock(nn.Module):
     """SET-style channel bottleneck that smooths only GT-defined background features."""
 
-    def __init__(self, channels: int, reduction: int = 4, kernel_size: int = 3):
+    def __init__(self, channels: int, reduction: int = 4, kernel_size: int = 3, exact_obb: bool = False):
         """Build a background denoiser used only by the auxiliary training path."""
         super().__init__()
         if reduction < 1 or channels < reduction:
@@ -75,6 +77,7 @@ class HBSBlock(nn.Module):
             nn.ReLU(),
             nn.Conv2d(hidden, channels, kernel_size, padding=padding),
         )
+        self.exact_obb = bool(exact_obb)
 
     @staticmethod
     def foreground_mask(feature: torch.Tensor, batch: dict[str, torch.Tensor]) -> torch.Tensor:
@@ -111,7 +114,12 @@ class HBSBlock(nn.Module):
 
     def forward(self, feature: torch.Tensor, batch: dict[str, torch.Tensor]) -> torch.Tensor:
         """Preserve foreground exactly and apply residual smoothing to background."""
-        foreground = self.foreground_mask(feature, batch).to(feature.dtype)
+        # foreground = self.foreground_mask(feature, batch).to(feature.dtype)
+        foreground = (
+            exact_obb_cell_overlap_mask(feature, batch)
+            if getattr(self, "exact_obb", False)
+            else self.foreground_mask(feature, batch)
+        ).to(feature.dtype)
         background = 1 - foreground
         background_feature = feature * background
         smoothed_background = background_feature + self.denoiser(background_feature)
@@ -226,6 +234,11 @@ class Detect(nn.Module):
         self.hbs_channels = tuple(ch)
         self.hbs_all_levels = False
         self.hbs_kernel_sizes = ()
+        self.hbs_exact_obb = False
+        self.fg_enhance_enabled = False
+        self.fg_enhance = None
+        self.fg_enhance_gain = 0.0
+        self.fg_enhance_kernel = 3
 
     def enable_reg_strip(self, kernel_size: int = 19) -> None:
         """Insert a StripBlock after the first local convolution in every bbox regression tower."""
@@ -264,17 +277,45 @@ class Detect(nn.Module):
                     )
                 kernel_sizes = tuple(self.adaptive_hbs_kernel_size(stride) for stride in strides)
                 self.hbs = nn.ModuleList(
-                    HBSBlock(channel, reduction, adaptive_kernel)
+                    HBSBlock(channel, reduction, adaptive_kernel, exact_obb=getattr(self, "hbs_exact_obb", False))
                     for channel, adaptive_kernel in zip(self.hbs_channels, kernel_sizes)
                 ).to(device=reference.device, dtype=reference.dtype)
             else:
                 kernel_sizes = (kernel_size,)
-                self.hbs = HBSBlock(self.hbs_channels[0], reduction, kernel_size).to(
+                self.hbs = HBSBlock(self.hbs_channels[0], reduction, kernel_size, exact_obb=getattr(self, "hbs_exact_obb", False)).to(
                     device=reference.device, dtype=reference.dtype
                 )
             self.hbs_all_levels = all_levels
             self.hbs_kernel_sizes = kernel_sizes
         self.hbs_enabled = True
+
+    def set_hbs_exact_obb(self, enabled: bool) -> None:
+        """Switch HBS foreground geometry without changing HBS parameters or inference."""
+        self.hbs_exact_obb = bool(enabled)
+
+        hbs = getattr(self, "hbs", None)
+
+        if isinstance(hbs, nn.ModuleList):
+            for block in hbs:
+                block.exact_obb = self.hbs_exact_obb
+
+        elif isinstance(hbs, HBSBlock):
+            hbs.exact_obb = self.hbs_exact_obb
+
+    def enable_fg_enhance(self, gain: float = 0.25, kernel_size: int = 3) -> None:
+        """Enable exact-OBB foreground detail enhancement on P3 in the HBS auxiliary path."""
+        self.fg_enhance = ForegroundDetailEnhancer(
+            gain=gain,
+            kernel_size=kernel_size,
+        )
+        self.fg_enhance_enabled = True
+        self.fg_enhance_gain = float(gain)
+        self.fg_enhance_kernel = int(kernel_size)
+
+    def disable_fg_enhance(self) -> None:
+        """Disable training-only foreground enhancement."""
+        self.fg_enhance_enabled = False
+        self.fg_enhance = None
 
     def hbs_features(self, features: list[torch.Tensor], batch: dict[str, torch.Tensor]) -> list[torch.Tensor]:
         """Return HBS-enhanced features for the auxiliary branch; inference never calls this method."""
@@ -289,6 +330,15 @@ class Detect(nn.Module):
             enhanced = [hbs(feature, batch) for hbs, feature in zip(self.hbs, enhanced)]
         else:
             enhanced[0] = self.hbs(enhanced[0], batch)
+        if (
+                getattr(self, "fg_enhance_enabled", False)
+                and getattr(self, "fg_enhance", None) is not None
+        ):
+            enhanced[0] = self.fg_enhance(
+                features[0],
+                batch,
+                base_feature=enhanced[0],
+            )
         return enhanced
 
     @property

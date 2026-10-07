@@ -1,0 +1,211 @@
+pip install opencv-python
+conda install -c conda-forge mesalib
+source /mnt/shared_data/huangxin/miniconda3/etc/profile.d/conda.sh
+conda activate /mnt/shared_data/huangxin/miniconda3/envs/race-sea
+hash -r
+export MPLBACKEND=Agg
+
+1》  baseline-train
+
+```bash
+python train.py \
+    task=obb \
+    model=yolo26m-obb.pt \
+    data=/mnt/data/wangzijian/train_data_sea/race_dataset.yaml \
+    imgsz=1024 \
+    epochs=300 \
+    batch=16 \
+    workers=8 \
+    device=0 \
+    project=runs/sea_race \
+    name=baseline-1024 \
+    strip_reg=True \
+    hbs=True \
+    hbs_all_levels=True \
+    hbs_gain=1.0 \
+    hbs_exact_obb=False \
+    degrees=10.0 \
+    flipud=0.5 \
+    fog_aug=False \
+    fg_enhance=False
+
+
+
+2》  fog-train
+
+```bash
+python train.py \
+    task=obb \
+    model=yolo26m-obb.pt \
+    data=/mnt/data/wangzijian/train_data_sea/race_dataset.yaml \
+    imgsz=960 \
+    epochs=300 \
+    batch=16 \
+    workers=8 \
+    device=0 \
+    project=runs/sea_race \
+    name=yolo26m-obb-fog025-fgP3 \
+    strip_reg=True \
+    hbs=True \
+    hbs_all_levels=True \
+    hbs_gain=1.0 \
+    hbs_exact_obb=True \
+    degrees=10.0 \
+    flipud=0.5 \
+    fog_aug=True \
+    fog_p=0.25 \
+    fog_light_prob=0.20 \
+    fog_medium_prob=0.30 \
+    fog_heavy_prob=0.50 \
+    fg_enhance=True \
+    fg_enhance_gain=0.25 \
+    fg_enhance_kernel=3
+
+
+
+3》  valid
+python val.py \
+    task=obb \
+    model=/mnt/data/huangxin/workspace/ultralytics/runs/obb/runs/sea_race/yolo26m-obb-fog025/weights/best.pt \
+    data=/mnt/data/wangzijian/train_data_sea/race_dataset.yaml \
+    split=val \
+    imgsz=640 \
+    batch=1 \
+    workers=8 \
+    device=0 \
+    project=runs/sea_race \
+    name=yolo26m-obb-val \
+    conf=0.55 \
+    iou=0.70 \
+    end2end=False
+
+    data=/mnt/data/huangxin/datasets/train_data_sea/race_dataset_fog_light.yaml \
+    data=/mnt/data/huangxin/datasets/train_data_sea/race_dataset_fog_medium.yaml \
+    data=/mnt/data/huangxin/datasets/train_data_sea/race_dataset_fog_heavy.yaml \
+
+
+
+4》  test
+python predict_sea.py \
+    --model /mnt/data/huangxin/workspace/ultralytics/runs/obb/runs/sea_race/yolo26m-obb-fog025/weights/best.pt \
+    --source /mnt/data/wangzijian/train_data_sea/images/test \
+    --output runs/sea_race/fog_aug/result.json \
+    --imgsz 640 \
+    --batch 1 \
+    --workers 8 \
+    --device 0 \
+    --conf 0.001 \
+    --iou 0.70 \
+    --save-images 100 \
+    --end2end False
+
+
+python predict_sea.py \
+    --model /mnt/data/huangxin/workspace/ultralytics/runs/obb/runs/sea_race/yolo26m-obb-fog025-fgP3/weights/best.pt \
+    --source /mnt/data/wangzijian/train_data_sea/images/test \
+    --output runs/sea_race/stage2_1/result.json \
+    --imgsz 960 \
+    --batch 1 \
+    --workers 8 \
+    --device 0 \
+    --conf 0.001 \
+    --iou 0.70 \
+    --save-images 100 \
+    --end2end False
+
+python val.py \
+    task=obb \
+    model=/mnt/data/huangxin/workspace/ultralytics/runs/obb/runs/sea_race/yolo26m-obb-fog025-fgP3/weights/best.pt \
+    data=/mnt/data/wangzijian/train_data_sea/race_dataset.yaml \
+    split=val \
+    imgsz=960 \
+    batch=1 \
+    workers=8 \
+    device=0 \
+    project=runs/sea_race \
+    name=yolo26m-obb-fog025-fgP3-val \
+    conf=0.55 \
+    iou=0.70 \
+    end2end=False
+
+
+
+
+python predict_sea.py \
+    --model /mnt/data/huangxin/workspace/ultralytics/runs/obb/runs/sea_race/yolo26m-obb-hbs-exact-obb/weights/best.pt \
+    --source /mnt/data/wangzijian/train_data_sea/images/test \
+    --output runs/sea_race/stage2-exact-obb/result.json \
+    --imgsz 960 \
+    --batch 1 \
+    --workers 8 \
+    --device 1 \
+    --conf 0.001 \
+    --iou 0.70 \
+    --save-images 100 \
+    --end2end False
+
+python val.py \
+    task=obb \
+    model=/mnt/data/huangxin/workspace/ultralytics/runs/obb/runs/sea_race/yolo26m-obb-hbs-exact-obb/weights/best.pt \
+    data=/mnt/data/wangzijian/train_data_sea/race_dataset.yaml \
+    split=val \
+    imgsz=960 \
+    batch=1 \
+    workers=8 \
+    device=0 \
+    project=runs/sea_race \
+    name=yolo26m-obb-hbs-exact-obb-val \
+    conf=0.55 \
+    iou=0.70 \
+    end2end=False
+
+
+
+python predict_sea.py \
+    --model /mnt/data/huangxin/workspace/Race_Sea/best.pt \
+    --source /mnt/data/wangzijian/train_data_sea/images/test \
+    --output runs/sea_race/push/result.json \
+    --imgsz 960 \
+    --batch 1 \
+    --workers 8 \
+    --device 0 \
+    --conf 0.05 \
+    --iou 0.70 \
+    --save-images 100 \
+    --end2end False
+
+python val.py \
+    task=obb \
+    model=/mnt/data/huangxin/workspace/Race_Sea/best.pt \
+    data=/mnt/data/wangzijian/train_data_sea/race_dataset.yaml \
+    split=val \
+    imgsz=960 \
+    batch=1 \
+    workers=8 \
+    device=0 \
+    project=runs/sea_race \
+    name=dino \
+    conf=0.55 \
+    iou=0.70 \
+    end2end=False
+
+
+
+python val.py \
+    task=obb \
+    model=/mnt/data/huangxin/workspace/ultralytics/runs/obb/runs/sea_race/yolo26m-obb-hbs-exact-obb/weights/best.pt \
+    data=/mnt/data/wangzijian/train_data_sea/race_dataset.yaml \
+    split=val \
+    imgsz=960 \
+    batch=1 \
+    workers=8 \
+    device=1 \
+    project=runs/sea_race \
+    name=exact-obb-val \
+    conf=0.55 \
+    iou=0.70 \
+    end2end=False
+
+    data=/mnt/data/huangxin/datasets/train_data_sea/race_dataset_fog_light.yaml \
+    data=/mnt/data/huangxin/datasets/train_data_sea/race_dataset_fog_medium.yaml \
+    data=/mnt/data/huangxin/datasets/train_data_sea/race_dataset_fog_heavy.yaml \

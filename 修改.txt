@@ -1,0 +1,264 @@
+《《1》》 ※※※新增文件 Race_Sea/ultralytics/data/fog_augment.py
+为训练图片加雾（training-only）
+
+    ※※※1.对应修改 ultralytics/data/augment.py
+
+①文件开头段加：from ultralytics.data.fog_augment import RandomFog
+②位置约line2846~2856修改：
+return Compose(
+    [
+        pre_transform,
+        MixUp(dataset, pre_transform=pre_transform, p=hyp.mixup),
+        CutMix(dataset, pre_transform=pre_transform, p=hyp.cutmix),
+        Albumentations(p=1.0, transforms=getattr(hyp, "augmentations", None), flip_idx=flip_idx),
+        RandomHSV(hgain=hyp.hsv_h, sgain=hyp.hsv_s, vgain=hyp.hsv_v),
+        RandomFlip(direction="vertical", p=hyp.flipud, flip_idx=flip_idx),
+        RandomFlip(direction="horizontal", p=hyp.fliplr, flip_idx=flip_idx),
+    ]
+)
+改为：
+return Compose(
+    [
+        pre_transform,
+        MixUp(dataset, pre_transform=pre_transform, p=hyp.mixup),
+        CutMix(dataset, pre_transform=pre_transform, p=hyp.cutmix),
+        Albumentations(p=1.0, transforms=getattr(hyp, "augmentations", None), flip_idx=flip_idx),
+        RandomHSV(hgain=hyp.hsv_h, sgain=hyp.hsv_s, vgain=hyp.hsv_v),
+        RandomFlip(direction="vertical", p=hyp.flipud, flip_idx=flip_idx),
+        RandomFlip(direction="horizontal", p=hyp.fliplr, flip_idx=flip_idx),
+
+        # Race_Sea: training-only non-uniform sea-fog augmentation.
+        RandomFog(
+            enabled=getattr(hyp, "fog_aug", False),
+            p=getattr(hyp, "fog_p", 0.25),
+            light_prob=getattr(hyp, "fog_light_prob", 0.55),
+            medium_prob=getattr(hyp, "fog_medium_prob", 0.35),
+            heavy_prob=getattr(hyp, "fog_heavy_prob", 0.10),
+        ),
+    ]
+)
+
+    ※※※2.对应修改 ultralytics/cfg/default.yaml
+
+位置约line128、"flipud"之前增加：
+# Race_Sea fog augmentation
+fog_aug: False # (bool) enable training-only non-uniform synthetic sea-fog augmentation
+fog_p: 0.25 # (float) probability that a training image receives synthetic fog when fog_aug=True
+fog_light_prob: 0.55 # (float) conditional probability of light fog
+fog_medium_prob: 0.35 # (float) conditional probability of medium fog
+fog_heavy_prob: 0.10 # (float) conditional probability of heavy fog
+
+
+
+《《2》》 ※※※新增文件 Race_Sea/tools/prepare_fog_val.py
+
+运行：
+python tools/prepare_fog_val.py \
+    --source-root /mnt/data/wangzijian/train_data_sea \
+    --output-root /mnt/data/huangxin/datasets/train_data_sea \
+    --seed 42 \
+    --overwrite
+
+python tools/prepare_fog_val.py \
+    --source-root /mnt/shared_data/wangzijian/train_data_sea \
+    --output-root /mnt/shared_data/huangxin/datasets/train_data_sea \
+    --seed 42 \
+    --overwrite
+
+
+
+《《3》》 ※※※新增文件 Race_Sea/ultralytics/nn/modules/foreground_enhance.py
+前景增强
+
+    ※※※1.对应修改 ultralytics/nn/modules/head.py
+
+①文件开头加：from .foreground_enhance import ForegroundDetailEnhancer
+②修改"class Detect(nn.Module):"的"def __init__()"：
+self.hbs_enabled = False
+self.hbs = None
+self.hbs_channels = tuple(ch)
+self.hbs_all_levels = False
+self.hbs_kernel_sizes = ()
+后加入：
+self.fg_enhance_enabled = False
+self.fg_enhance = None
+self.fg_enhance_gain = 0.0
+self.fg_enhance_kernel = 3
+③位置约line250-280，"def enable_hbs()"之后新增：
+def enable_fg_enhance(self, gain: float = 0.25, kernel_size: int = 3) -> None:
+    """Enable exact-OBB foreground detail enhancement on P3 in the HBS auxiliary path."""
+    self.fg_enhance = ForegroundDetailEnhancer(
+        gain=gain,
+        kernel_size=kernel_size,
+    )
+    self.fg_enhance_enabled = True
+    self.fg_enhance_gain = float(gain)
+    self.fg_enhance_kernel = int(kernel_size)
+
+def disable_fg_enhance(self) -> None:
+    """Disable training-only foreground enhancement."""
+    self.fg_enhance_enabled = False
+    self.fg_enhance = None
+④位置约line300，"hbs_features()"内修改：
+if isinstance(self.hbs, nn.ModuleList):
+    ...
+else:
+    enhanced[0] = self.hbs(enhanced[0], batch)
+return enhanced
+改为：
+if isinstance(self.hbs, nn.ModuleList):
+    ...
+else:
+    enhanced[0] = self.hbs(enhanced[0], batch)
+if (
+    getattr(self, "fg_enhance_enabled", False)
+    and getattr(self, "fg_enhance", None) is not None
+):
+    enhanced[0] = self.fg_enhance(
+        features[0],
+        batch,
+        base_feature=enhanced[0],
+    )
+return enhanced
+
+    ※※※2.对应修改 ultralytics/models/yolo/obb/train.py
+
+①位置约line87，"elif not self.args.hbs and source_has_hbs:"之后"if self.args.strip_reg:"之前增加：
+if self.args.fg_enhance and not self.args.hbs:
+    raise ValueError(
+        "fg_enhance=True requires hbs=True because it belongs "
+        "to the HBS auxiliary path."
+    )
+if self.args.fg_enhance:
+    model.model[-1].enable_fg_enhance(
+        gain=self.args.fg_enhance_gain,
+        kernel_size=self.args.fg_enhance_kernel,
+    )
+else:
+    model.model[-1].disable_fg_enhance()
+②"if self.args.hbs:"之后"return model"之前增加：
+if self.args.fg_enhance:
+    LOGGER.info(
+        "Foreground detail enhancement enabled for OBB: "
+        "training-only exact-OBB P3 enhancement "
+        f"(gain={self.args.fg_enhance_gain}, "
+        f"kernel={self.args.fg_enhance_kernel})."
+    )
+
+    ※※※3.对应修改 ultralytics/cfg/default.yaml
+
+位置约line32，"hbs_gain"之后增加：
+fg_enhance: False
+fg_enhance_gain: 0.25
+fg_enhance_kernel: 3
+
+    ※※※4.对应修改 ultralytics/cfg/__init__.py
+
+① CFG_FLOAT_KEYS中加入：
+"fg_enhance_gain",
+② CFG_INT_KEYS中加入：
+"fg_enhance_kernel",
+③ CFG_BOOL_KEYS中加入：
+"fog_aug",
+"fg_enhance",
+④ CFG_FRACTION_KEYS中加入：
+"fog_p",
+"fog_light_prob",
+"fog_medium_prob",
+"fog_heavy_prob",
+
+
+
+《《4》》   ※※※新增文件 Race_Sea/ultralytics/nn/modules/hbs_masks.py
+HBS的OBB掩码
+
+    ※※※1.对应修改 ultralytics/nn/modules/head.py
+
+①文件开头加：from .hbs_masks import exact_obb_cell_overlap_mask
+②修改"class HBSBlock(nn.Module):"的"def __init__()"：
+def __init__(self, channels: int, reduction: int = 4, kernel_size: int = 3):
+改为：
+def __init__(self, channels: int, reduction: int = 4, kernel_size: int = 3, exact_obb: bool = False):
+随后在"self.denoiser"初始化语句后加：
+self.exact_obb = bool(exact_obb)
+③修改"class HBSBlock(nn.Module):"的"def forward()"：
+foreground = self.foreground_mask(feature, batch).to(feature.dtype)
+改成：
+foreground = (
+    exact_obb_cell_overlap_mask(feature, batch)
+    if getattr(self, "exact_obb", False)
+    else self.foreground_mask(feature, batch)
+).to(feature.dtype)
+④修改"class Detect(nn.Module):"的"def __init__()"：
+self.hbs_enabled = False
+self.hbs = None
+self.hbs_channels = tuple(ch)
+self.hbs_all_levels = False
+self.hbs_kernel_sizes = ()
+后加入：
+self.hbs_exact_obb = False
+⑤修改"def enable_hbs()":
+self.hbs = nn.ModuleList(
+    HBSBlock(channel, reduction, adaptive_kernel)
+    ···
+)
+的"HBSBlock()"参数调整：
+HBSBlock(channel, reduction, adaptive_kernel, exact_obb=getattr(self, "hbs_exact_obb", False))
+随后：
+self.hbs = HBSBlock(self.hbs_channels[0], reduction, kernel_size)···
+的"HBSBlock()"参数调整：
+self.hbs = HBSBlock(self.hbs_channels[0], reduction, kernel_size, exact_obb=getattr(self, "hbs_exact_obb", False))
+⑥在"def enable_hbs()"之后增加：
+def set_hbs_exact_obb(self, enabled: bool) -> None:
+    """Switch HBS foreground geometry without changing HBS parameters or inference."""
+    self.hbs_exact_obb = bool(enabled)
+
+    hbs = getattr(self, "hbs", None)
+
+    if isinstance(hbs, nn.ModuleList):
+        for block in hbs:
+            block.exact_obb = self.hbs_exact_obb
+
+    elif isinstance(hbs, HBSBlock):
+        hbs.exact_obb = self.hbs_exact_obb
+
+    ※※※2.对应修改 ultralytics/models/yolo/obb/train.py
+
+①位置约line87，"elif not self.args.hbs and source_has_hbs:"之后加入：
+if self.args.hbs_exact_obb and not self.args.hbs:
+    raise ValueError(
+        "hbs_exact_obb=True requires hbs=True."
+    )
+model.model[-1].set_hbs_exact_obb(
+    self.args.hbs_exact_obb
+    if self.args.hbs
+    else False
+)
+②随后"if self.args.hbs:"中：
+加入：
+mask_mode = (
+    "exact OBB-cell overlap"
+    if head.hbs_exact_obb
+    else "enclosing AABB-cell overlap"
+)
+同时"LOGGER.info()"改为：
+LOGGER.info(
+    f"HBS enabled for OBB: training-only background smoothing "
+    f"on {levels} with kernels {head.hbs_kernel_sizes}, "
+    f"{mask_mode}, and an auxiliary one-to-many loss."
+)
+
+    ※※※3.对应修改 ultralytics/cfg/default.yaml
+
+位置约line32，"hbs_gain"之后增加：
+hbs_exact_obb: False # (bool) use exact OBB-vs-feature-cell overlap mask instead of enclosing AABB mask
+
+    ※※※4.对应修改 ultralytics/cfg/__init__.py
+
+"CFG_BOOL_KEYS"中加入：
+"hbs_exact_obb",
+
+
+
+《《5》    ※※※新增文件
+

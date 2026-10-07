@@ -21,6 +21,8 @@ from ultralytics.utils.metrics import bbox_ioa
 from ultralytics.utils.ops import segment2box, xywh2xyxy, xyxyxyxy2xywhr
 from ultralytics.utils.torch_utils import TORCHVISION_0_10, TORCHVISION_0_11, TORCHVISION_0_13
 
+from ultralytics.data.fog_augment import RandomFog
+
 DEFAULT_MEAN = (0.0, 0.0, 0.0)
 DEFAULT_STD = (1.0, 1.0, 1.0)
 
@@ -2850,6 +2852,15 @@ def v8_transforms(dataset, imgsz: int, hyp: IterableSimpleNamespace):
             RandomHSV(hgain=hyp.hsv_h, sgain=hyp.hsv_s, vgain=hyp.hsv_v),
             RandomFlip(direction="vertical", p=hyp.flipud, flip_idx=flip_idx),
             RandomFlip(direction="horizontal", p=hyp.fliplr, flip_idx=flip_idx),
+
+            # Race_Sea: training-only non-uniform sea-fog augmentation.
+            RandomFog(
+                enabled=getattr(hyp, "fog_aug", False),
+                p=getattr(hyp, "fog_p", 0.25),
+                light_prob=getattr(hyp, "fog_light_prob", 0.55),
+                medium_prob=getattr(hyp, "fog_medium_prob", 0.35),
+                heavy_prob=getattr(hyp, "fog_heavy_prob", 0.10),
+            ),
         ]
     )  # transforms
 

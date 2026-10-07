@@ -84,14 +84,48 @@ class OBBTrainer(yolo.detect.DetectionTrainer):
         elif not self.args.hbs and source_has_hbs:
             model.model[-1].hbs_enabled = False
             model.model[-1].hbs = None
+        if self.args.hbs_exact_obb and not self.args.hbs:
+            raise ValueError(
+                "hbs_exact_obb=True requires hbs=True."
+            )
+        model.model[-1].set_hbs_exact_obb(
+            self.args.hbs_exact_obb
+            if self.args.hbs
+            else False
+        )
+        if self.args.fg_enhance and not self.args.hbs:
+            raise ValueError(
+                "fg_enhance=True requires hbs=True because it belongs "
+                "to the HBS auxiliary path."
+            )
+        if self.args.fg_enhance:
+            model.model[-1].enable_fg_enhance(
+                gain=self.args.fg_enhance_gain,
+                kernel_size=self.args.fg_enhance_kernel,
+            )
+        else:
+            model.model[-1].disable_fg_enhance()
         if self.args.strip_reg:
             LOGGER.info("Strip regression enabled for the OBB regression towers.")
         if self.args.hbs:
             head = model.model[-1]
             levels = "all detection levels" if head.hbs_all_levels else "P3 only"
+            mask_mode = (
+                "exact OBB-cell overlap"
+                if head.hbs_exact_obb
+                else "enclosing AABB-cell overlap"
+            )
             LOGGER.info(
                 f"HBS enabled for OBB: training-only background smoothing on {levels} with kernels "
                 f"{head.hbs_kernel_sizes} and an auxiliary one-to-many loss."
+                f"{mask_mode}, and an auxiliary one-to-many loss."
+            )
+        if self.args.fg_enhance:
+            LOGGER.info(
+                "Foreground detail enhancement enabled for OBB: "
+                "training-only exact-OBB P3 enhancement "
+                f"(gain={self.args.fg_enhance_gain}, "
+                f"kernel={self.args.fg_enhance_kernel})."
             )
 
         return model
