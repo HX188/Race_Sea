@@ -29,10 +29,14 @@ strip_reg: False # (bool) add a Strip R-CNN-style StripBlock to bbox regression 
 hbs: False # (bool) add training-only hierarchical background smoothing with an auxiliary detection loss
 hbs_all_levels: False # (bool) apply HBS to every detection level using SET stride-adaptive kernels (P3/P4/P5: 3/5/5)
 hbs_gain: 1.0 # (float) HBS auxiliary-loss gain relative to the clean one-to-many loss
-hbs_exact_obb: False # (bool) use exact OBB-vs-feature-cell overlap mask instead of enclosing AABB mask
 fg_enhance: False
 fg_enhance_gain: 0.25
 fg_enhance_kernel: 3
+ffc: False # (bool) enable training-only Fog Feature Contrast loss on raw P3
+ffc_gain: 0.05 # (float) maximum FFC loss gain after warmup
+ffc_margin: 0.20 # (float) cosine-similarity margin for foreground/background separation
+ffc_bg_scale: 2.0 # (float) local background outer OBB scale
+ffc_warmup_epochs: 20 # (int) epochs for linear FFC gain warmup
 verbose: True # (bool) print verbose logs
 seed: 0 # (int) random seed for reproducibility
 deterministic: True # (bool) enable deterministic ops; reproducible but may be slower
@@ -130,6 +134,11 @@ translate: 0.1 # (float) translation fraction (+/-)
 scale: 0.5 # (float | tuple) scale gain (+/-) as float, or explicit (min, max) tuple
 shear: 0.0 # (float) shear degrees (+/-)
 perspective: 0.0 # (float) perspective fraction (0–0.001 typical)
+# Frequency-domain augmentation
+freq_aug: False
+freq_aug_prob: 0.5
+freq_strength: 0.1
+freq_radius: 0.1
 # Race_Sea fog augmentation
 fog_aug: False # (bool) enable training-only non-uniform synthetic sea-fog augmentation
 fog_p: 0.25 # (float) probability that a training image receives synthetic fog when fog_aug=True

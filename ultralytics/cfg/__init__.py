@@ -219,6 +219,9 @@ CFG_FLOAT_KEYS = frozenset(
         "batch",
         "hbs_gain",
         "fg_enhance_gain",
+        "ffc_gain",
+        "ffc_margin",
+        "ffc_bg_scale",
     }
 )
 CFG_FRACTION_KEYS = frozenset(
@@ -253,6 +256,9 @@ CFG_FRACTION_KEYS = frozenset(
         "fog_light_prob",
         "fog_medium_prob",
         "fog_heavy_prob",
+        "freq_aug_prob",
+        "freq_strength",
+        "freq_radius",
     }
 )
 CFG_INT_KEYS = frozenset(
@@ -269,6 +275,7 @@ CFG_INT_KEYS = frozenset(
         "nbs",
         "save_period",
         "fg_enhance_kernel",
+        "ffc_warmup_epochs",
     }
 )
 CFG_INT_MIN = {  # minimum valid values for integer arguments used as divisors, sizes or seeds
@@ -316,9 +323,10 @@ CFG_BOOL_KEYS = frozenset(
         "strip_reg",
         "hbs",
         "hbs_all_levels",
-        "hbs_exact_obb",
         "fog_aug",
         "fg_enhance",
+        "ffc",
+        "freq_aug",
     }
 )
 CFG_STR_KEYS = frozenset({"optimizer", "split", "copy_paste_mode", "auto_augment"})

@@ -1,5 +1,6 @@
 《《1》》 ※※※新增文件 Race_Sea/ultralytics/data/fog_augment.py
 为训练图片加雾（training-only）
+-----用《5》的更新后文件即可
 
     ※※※1.对应修改 ultralytics/data/augment.py
 
@@ -31,9 +32,9 @@ return Compose(
         RandomFog(
             enabled=getattr(hyp, "fog_aug", False),
             p=getattr(hyp, "fog_p", 0.25),
-            light_prob=getattr(hyp, "fog_light_prob", 0.55),
-            medium_prob=getattr(hyp, "fog_medium_prob", 0.35),
-            heavy_prob=getattr(hyp, "fog_heavy_prob", 0.10),
+            light_prob=getattr(hyp, "fog_light_prob", 0.20),
+            medium_prob=getattr(hyp, "fog_medium_prob", 0.30),
+            heavy_prob=getattr(hyp, "fog_heavy_prob", 0.50),
         ),
     ]
 )
@@ -44,9 +45,9 @@ return Compose(
 # Race_Sea fog augmentation
 fog_aug: False # (bool) enable training-only non-uniform synthetic sea-fog augmentation
 fog_p: 0.25 # (float) probability that a training image receives synthetic fog when fog_aug=True
-fog_light_prob: 0.55 # (float) conditional probability of light fog
-fog_medium_prob: 0.35 # (float) conditional probability of medium fog
-fog_heavy_prob: 0.10 # (float) conditional probability of heavy fog
+fog_light_prob: 0.20 # (float) conditional probability of light fog
+fog_medium_prob: 0.30 # (float) conditional probability of medium fog
+fog_heavy_prob: 0.50 # (float) conditional probability of heavy fog
 
 
 
@@ -68,12 +69,12 @@ python tools/prepare_fog_val.py \
 
 
 《《3》》 ※※※新增文件 Race_Sea/ultralytics/nn/modules/foreground_enhance.py
-前景增强
+前景增强（training-only）
 
     ※※※1.对应修改 ultralytics/nn/modules/head.py
 
-①文件开头加：from .foreground_enhance import ForegroundDetailEnhancer
-②修改"class Detect(nn.Module):"的"def __init__()"：
+①文件开头段加：from .foreground_enhance import ForegroundDetailEnhancer
+②修改"class Detect(nn.Module):"的"def __init__(...)"：
 self.hbs_enabled = False
 self.hbs = None
 self.hbs_channels = tuple(ch)
@@ -84,7 +85,7 @@ self.fg_enhance_enabled = False
 self.fg_enhance = None
 self.fg_enhance_gain = 0.0
 self.fg_enhance_kernel = 3
-③位置约line250-280，"def enable_hbs()"之后新增：
+③位置约line250-280，"def enable_hbs(...)"之后新增：
 def enable_fg_enhance(self, gain: float = 0.25, kernel_size: int = 3) -> None:
     """Enable exact-OBB foreground detail enhancement on P3 in the HBS auxiliary path."""
     self.fg_enhance = ForegroundDetailEnhancer(
@@ -99,7 +100,7 @@ def disable_fg_enhance(self) -> None:
     """Disable training-only foreground enhancement."""
     self.fg_enhance_enabled = False
     self.fg_enhance = None
-④位置约line300，"hbs_features()"内修改：
+④位置约line300，"def hbs_features(...)"内修改：
 if isinstance(self.hbs, nn.ModuleList):
     ...
 else:
@@ -123,6 +124,7 @@ return enhanced
 
     ※※※2.对应修改 ultralytics/models/yolo/obb/train.py
 
+修改"class OBBTrainer(yolo.detect.DetectionTrainer):"的"def get_model(...)"：
 ①位置约line87，"elif not self.args.hbs and source_has_hbs:"之后"if self.args.strip_reg:"之前增加：
 if self.args.fg_enhance and not self.args.hbs:
     raise ValueError(
@@ -170,95 +172,197 @@ fg_enhance_kernel: 3
 
 
 《《4》》   ※※※新增文件 Race_Sea/ultralytics/nn/modules/hbs_masks.py
-HBS的OBB掩码
+HBS的OBB膨胀掩码（training-only）
 
     ※※※1.对应修改 ultralytics/nn/modules/head.py
 
-①文件开头加：from .hbs_masks import exact_obb_cell_overlap_mask
-②修改"class HBSBlock(nn.Module):"的"def __init__()"：
-def __init__(self, channels: int, reduction: int = 4, kernel_size: int = 3):
+①文件开头段加：from .hbs_masks import dilated_obb_cell_overlap_mask
+②修改"class HBSBlock(nn.Module):"的"def foreground_mask(...)"：
+整个函数体直接替换为：
+@staticmethod
+def foreground_mask(feature: torch.Tensor, batch: dict[str, torch.Tensor]) -> torch.Tensor:
+    """Protect a 1.15x dilated OBB region and smooth the remaining background."""
+    return dilated_obb_cell_overlap_mask(feature, batch)
+
+
+
+《《5》》   ※※※新增文件Race_Sea/ultralytics/utils/fog_contrast.py
+            ※※※更新文件Race_Sea/ultralytics/data/fog_augment.py
+添加FFC loss（training-only）
+
+    ※※※1.对应修改 ultralytics/data/augment.py
+
+①修改"RandomFog(...)"：
+RandomFog(
+    enabled=getattr(hyp, "fog_aug", False),
+    p=getattr(hyp, "fog_p", 0.25),
+    light_prob=getattr(hyp, "fog_light_prob", 0.20),
+    medium_prob=getattr(hyp, "fog_medium_prob", 0.30),
+    heavy_prob=getattr(hyp, "fog_heavy_prob", 0.50),
+),
 改为：
-def __init__(self, channels: int, reduction: int = 4, kernel_size: int = 3, exact_obb: bool = False):
-随后在"self.denoiser"初始化语句后加：
-self.exact_obb = bool(exact_obb)
-③修改"class HBSBlock(nn.Module):"的"def forward()"：
-foreground = self.foreground_mask(feature, batch).to(feature.dtype)
-改成：
-foreground = (
-    exact_obb_cell_overlap_mask(feature, batch)
-    if getattr(self, "exact_obb", False)
-    else self.foreground_mask(feature, batch)
-).to(feature.dtype)
-④修改"class Detect(nn.Module):"的"def __init__()"：
-self.hbs_enabled = False
-self.hbs = None
-self.hbs_channels = tuple(ch)
-self.hbs_all_levels = False
-self.hbs_kernel_sizes = ()
-后加入：
-self.hbs_exact_obb = False
-⑤修改"def enable_hbs()":
-self.hbs = nn.ModuleList(
-    HBSBlock(channel, reduction, adaptive_kernel)
-    ···
-)
-的"HBSBlock()"参数调整：
-HBSBlock(channel, reduction, adaptive_kernel, exact_obb=getattr(self, "hbs_exact_obb", False))
-随后：
-self.hbs = HBSBlock(self.hbs_channels[0], reduction, kernel_size)···
-的"HBSBlock()"参数调整：
-self.hbs = HBSBlock(self.hbs_channels[0], reduction, kernel_size, exact_obb=getattr(self, "hbs_exact_obb", False))
-⑥在"def enable_hbs()"之后增加：
-def set_hbs_exact_obb(self, enabled: bool) -> None:
-    """Switch HBS foreground geometry without changing HBS parameters or inference."""
-    self.hbs_exact_obb = bool(enabled)
-
-    hbs = getattr(self, "hbs", None)
-
-    if isinstance(hbs, nn.ModuleList):
-        for block in hbs:
-            block.exact_obb = self.hbs_exact_obb
-
-    elif isinstance(hbs, HBSBlock):
-        hbs.exact_obb = self.hbs_exact_obb
-
-    ※※※2.对应修改 ultralytics/models/yolo/obb/train.py
-
-①位置约line87，"elif not self.args.hbs and source_has_hbs:"之后加入：
-if self.args.hbs_exact_obb and not self.args.hbs:
-    raise ValueError(
-        "hbs_exact_obb=True requires hbs=True."
+RandomFog(
+    enabled=getattr(hyp, "fog_aug", False),
+    p=getattr(hyp, "fog_p", 0.25),
+    light_prob=getattr(hyp, "fog_light_prob", 0.20),
+    medium_prob=getattr(hyp, "fog_medium_prob", 0.30),
+    heavy_prob=getattr(hyp, "fog_heavy_prob", 0.50),
+    save_clean=getattr(hyp, "ffc", False),
+),
+②修改"class Format(BaseTransform):"的"def apply_image(...)"
+整个函数体直接替换为：
+def apply_image(self, labels: dict[str, Any], params: dict[str, Any] | None = None) -> dict[str, Any]:
+    img = labels.pop("img", None)
+    clean_img = labels.pop("fog_clean_img", None)
+    if img is not None:
+        if clean_img is None:
+            labels["img"] = self._format_img(img)
+        else:
+            reverse_channels = (
+                random.uniform(0, 1) > self.bgr
+                and img.ndim == 3
+                and img.shape[2] == 3
+            )
+            labels["img"] = self._format_img(
+                img,
+                reverse_channels=reverse_channels,
+            )
+            labels["fog_clean_img"] = self._format_img(
+                clean_img,
+                reverse_channels=reverse_channels,
+            )
+    return labels
+③修改"class Format(BaseTransform):"的"def _format_img(...)"：
+整个函数体直接替换为：
+def _format_img(self,  img: np.ndarray,  reverse_channels: bool | None = None) -> torch.Tensor:
+    if len(img.shape) < 3:
+        img = img[..., None]
+    img = img.transpose(2, 0, 1)
+    if reverse_channels is None:
+        reverse_channels = (
+            random.uniform(0, 1) > self.bgr
+            and img.shape[0] == 3
+        )
+    img = np.ascontiguousarray(
+        img[::-1]
+        if reverse_channels and img.shape[0] == 3
+        else img
     )
-model.model[-1].set_hbs_exact_obb(
-    self.args.hbs_exact_obb
-    if self.args.hbs
-    else False
+    return torch.from_numpy(img)
+
+    ※※※2.对应修改 ultralytics/data/dataset.py
+
+修改"class YOLODataset(BaseDataset):"的"def collate_fn(...)"：
+在"new_batch = {}"之前加入：
+ffc_pairs = []
+for sample_i, sample in enumerate(batch):
+    clean_img = sample.pop("fog_clean_img", None)
+    if clean_img is not None:
+        ffc_pairs.append(
+            (sample_i, clean_img)
+        )
+随后在"return new_batch"之前加入：
+if ffc_pairs:
+    new_batch["fog_pair_idx"] = torch.tensor(
+        [sample_i for sample_i, _ in ffc_pairs],
+        dtype=torch.long,
+    )
+    new_batch["fog_clean_img"] = torch.stack(
+        [clean_img for _, clean_img in ffc_pairs],
+        dim=0,
+    )
+
+    ※※※3.对应修改 ultralytics/models/yolo/obb/train.py
+
+①文件开头段加：from torch.nn import functional as F
+②在"class OBBTrainer(yolo.detect.DetectionTrainer):"的"def __init__(...)"之后加入：
+def preprocess_batch(self, batch: dict) -> dict:
+    """Preprocess OBB batch and keep FFC clean pairs aligned with fog inputs."""
+    batch = super().preprocess_batch(batch)
+    if "fog_clean_img" in batch:
+        clean = batch["fog_clean_img"].float() / 255.0
+        if clean.shape[-2:] != batch["img"].shape[-2:]:
+            clean = F.interpolate(
+                clean,
+                size=batch["img"].shape[-2:],
+                mode="bilinear",
+                align_corners=False,
+            )
+        batch["fog_clean_img"] = clean
+    return batch
+③修改"class OBBTrainer(yolo.detect.DetectionTrainer):"的"def get_model(...)"：
+返回前加入：
+if self.args.ffc and (
+    not self.args.fog_aug
+    or self.args.fog_p <= 0
+):
+    raise ValueError(
+        "ffc=True requires fog_aug=True and fog_p > 0."
+    )
+以及：
+if self.args.ffc:
+    LOGGER.info(
+        "FFC enabled for OBB: P3-only clean/fog invariance + "
+        "local foreground/background separation "
+        f"(gain={self.args.ffc_gain}, "
+        f"margin={self.args.ffc_margin}, "
+        f"bg_scale={self.args.ffc_bg_scale}, "
+        f"warmup={self.args.ffc_warmup_epochs} epochs)."
+    )
+
+    ※※※4.对应修改 ultralytics/utils/loss.py
+
+①文件开头段加：
+import weakref
+from ultralytics.utils.fog_contrast import (
+    FogFeatureContrastLoss,
+    extract_p3_feature,
 )
-②随后"if self.args.hbs:"中：
+②修改"class E2ELoss:"的"def __init__(...)"：
+"self.final_o2m = 0.1"之后加入：
+self.model_ref = weakref.ref(model)
+self.ffc_enabled = bool(getattr(self.one2many.hyp, "ffc", False))
+self.ffc_gain = float(getattr(self.one2many.hyp, "ffc_gain", 0.05))
+self.ffc_warmup_epochs = int(getattr(self.one2many.hyp, "ffc_warmup_epochs", 20))
+self.ffc_loss_fn = (
+    FogFeatureContrastLoss(
+        margin=float(getattr(self.one2many.hyp, "ffc_margin", 0.20)),
+        bg_scale=float(getattr(self.one2many.hyp, "ffc_bg_scale", 2.0)),
+    )
+    if self.ffc_enabled
+    else None
+)
+③在"class E2ELoss:"的"def __call__(...)"之后加入：
+def current_ffc_gain(self) -> float:
+    """Return linearly warmed-up FFC gain for the current epoch."""
+    if not self.ffc_enabled:
+        return 0.0
+    if self.ffc_warmup_epochs <= 0:
+        return self.ffc_gain
+    return self.ffc_gain * min(
+        (self.updates + 1)
+        / self.ffc_warmup_epochs,
+        1.0,
+    )
+④修改"class E2ELoss:"的"def __call__(...)"：
+整个函数体直接替换为"E2ELOSS_FFC_CALL.txt"里的内容
+
+    ※※※5.对应修改 ultralytics/cfg/default.yaml
+
 加入：
-mask_mode = (
-    "exact OBB-cell overlap"
-    if head.hbs_exact_obb
-    else "enclosing AABB-cell overlap"
-)
-同时"LOGGER.info()"改为：
-LOGGER.info(
-    f"HBS enabled for OBB: training-only background smoothing "
-    f"on {levels} with kernels {head.hbs_kernel_sizes}, "
-    f"{mask_mode}, and an auxiliary one-to-many loss."
-)
+ffc: False # (bool) enable training-only Fog Feature Contrast loss on raw P3
+ffc_gain: 0.05 # (float) maximum FFC loss gain after warmup
+ffc_margin: 0.20 # (float) cosine-similarity margin for foreground/background separation
+ffc_bg_scale: 2.0 # (float) local background outer OBB scale
+ffc_warmup_epochs: 20 # (int) epochs for linear FFC gain warmup
 
-    ※※※3.对应修改 ultralytics/cfg/default.yaml
+    ※※※6.对应修改 ultralytics/cfg/__init__.py
 
-位置约line32，"hbs_gain"之后增加：
-hbs_exact_obb: False # (bool) use exact OBB-vs-feature-cell overlap mask instead of enclosing AABB mask
-
-    ※※※4.对应修改 ultralytics/cfg/__init__.py
-
-"CFG_BOOL_KEYS"中加入：
-"hbs_exact_obb",
-
-
-
-《《5》    ※※※新增文件
-
+①"CFG_FLOAT_KEYS"中加入：
+"ffc_gain",
+"ffc_margin",
+"ffc_bg_scale",
+②"CFG_INT_KEYS"中加入：
+"ffc_warmup_epochs",
+③"CFG_BOOL_KEYS"中加入：
+"ffc",

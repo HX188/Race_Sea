@@ -18,6 +18,11 @@ from ultralytics.utils.torch_utils import autocast
 from .metrics import bbox_iou, probiou
 from .tal import bbox2dist, rbox2dist
 
+import weakref
+from ultralytics.utils.fog_contrast import (
+    FogFeatureContrastLoss,
+    extract_p3_feature,
+)
 
 class VarifocalLoss(nn.Module):
     """Varifocal loss by Zhang et al.
@@ -1306,19 +1311,126 @@ class E2ELoss:
         self.o2m_copy = self.o2m
         # final gain
         self.final_o2m = 0.1
+        # ffc
+        self.model_ref = weakref.ref(model)
+        self.ffc_enabled = bool(getattr(self.one2many.hyp, "ffc", False))
+        self.ffc_gain = float(getattr(self.one2many.hyp, "ffc_gain", 0.05))
+        self.ffc_warmup_epochs = int(getattr(self.one2many.hyp, "ffc_warmup_epochs", 20))
+        self.ffc_loss_fn = (
+            FogFeatureContrastLoss(
+                margin=float(getattr(self.one2many.hyp, "ffc_margin", 0.20)),
+                bg_scale=float(getattr(self.one2many.hyp, "ffc_bg_scale", 2.0)),
+            )
+            if self.ffc_enabled
+            else None
+        )
 
+    # def __call__(self, preds: Any, batch: dict[str, torch.Tensor]) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+    #     """Calculate the sum of the loss for box, cls and dfl multiplied by batch size."""
+    #     preds = self.one2many.parse_output(preds)
+    #     one2many, one2one = preds["one2many"], preds["one2one"]
+    #     loss_one2many = self.one2many.loss(one2many, batch)
+    #     loss_one2one = self.one2one.loss(one2one, batch)
+    #     loss = loss_one2many[0] * self.o2m + loss_one2one[0] * self.o2o
+    #     if getattr(self.head, "hbs_enabled", False):
+    #         enhanced = self.head.hbs_features(one2many["feats"], batch)
+    #         hbs_preds = self.head.forward_head(enhanced, **self.head.one2many)
+    #         loss = loss + self.one2many.hyp.hbs_gain * self.o2m * self.one2many.loss(hbs_preds, batch)[0]
+    #     return loss, loss_one2one[1]
     def __call__(self, preds: Any, batch: dict[str, torch.Tensor]) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
-        """Calculate the sum of the loss for box, cls and dfl multiplied by batch size."""
+        """Calculate end-to-end OBB loss plus optional training-only FFC."""
         preds = self.one2many.parse_output(preds)
         one2many, one2one = preds["one2many"], preds["one2one"]
+
         loss_one2many = self.one2many.loss(one2many, batch)
         loss_one2one = self.one2one.loss(one2one, batch)
+
         loss = loss_one2many[0] * self.o2m + loss_one2one[0] * self.o2o
+
         if getattr(self.head, "hbs_enabled", False):
             enhanced = self.head.hbs_features(one2many["feats"], batch)
             hbs_preds = self.head.forward_head(enhanced, **self.head.one2many)
-            loss = loss + self.one2many.hyp.hbs_gain * self.o2m * self.one2many.loss(hbs_preds, batch)[0]
-        return loss, loss_one2one[1]
+            loss = loss + (
+                self.one2many.hyp.hbs_gain
+                * self.o2m
+                * self.one2many.loss(hbs_preds, batch)[0]
+            )
+
+        loss_items = dict(loss_one2one[1])
+
+        if self.ffc_enabled:
+            zero = loss.sum() * 0.0
+            inv_loss = zero
+            sep_loss = zero
+            weighted_ffc = zero
+
+            model = self.model_ref()
+            current_gain = (
+                self.current_ffc_gain()
+                if model is not None and model.training
+                else 0.0
+            )
+
+            clean_img = batch.get("fog_clean_img")
+            pair_idx = batch.get("fog_pair_idx")
+
+            if (
+                model is not None
+                and model.training
+                and current_gain > 0.0
+                and clean_img is not None
+                and pair_idx is not None
+                and pair_idx.numel() > 0
+            ):
+                clean_p3 = extract_p3_feature(model, clean_img)
+                inv_loss, sep_loss = self.ffc_loss_fn(
+                    fog_p3=one2many["feats"][0],
+                    clean_p3=clean_p3,
+                    batch=batch,
+                    pair_idx=pair_idx,
+                )
+
+                # Per-image-equivalent term used for logging.
+                weighted_ffc = current_gain * (inv_loss + sep_loss)
+
+            # Existing OBB losses are batch-scaled before trainer.sum().
+            # Append one additional batch-scaled FFC scalar rather than adding
+            # the scalar to every OBB loss component.
+            batch_size = int(batch["img"].shape[0])
+            loss = torch.cat(
+                (
+                    loss.reshape(-1),
+                    (weighted_ffc * batch_size).reshape(1),
+                )
+            )
+
+            loss_items.update(
+                {
+                    "ffc_gain": torch.as_tensor(
+                        current_gain,
+                        device=loss.device,
+                        dtype=torch.float32,
+                    ),
+                    "ffc_inv_loss": inv_loss.detach(),
+                    "ffc_sep_loss": sep_loss.detach(),
+                    "ffc_loss": weighted_ffc.detach(),
+                }
+            )
+
+        return loss, loss_items
+
+
+    def current_ffc_gain(self) -> float:
+        """Return linearly warmed-up FFC gain for the current epoch."""
+        if not self.ffc_enabled:
+            return 0.0
+        if self.ffc_warmup_epochs <= 0:
+            return self.ffc_gain
+        return self.ffc_gain * min(
+            (self.updates + 1)
+            / self.ffc_warmup_epochs,
+            1.0,
+        )
 
     def update(self) -> None:
         """Update the weights for one-to-many and one-to-one losses based on the decay schedule."""

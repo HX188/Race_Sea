@@ -21,6 +21,7 @@ from ultralytics.utils.metrics import bbox_ioa
 from ultralytics.utils.ops import segment2box, xywh2xyxy, xyxyxyxy2xywhr
 from ultralytics.utils.torch_utils import TORCHVISION_0_10, TORCHVISION_0_11, TORCHVISION_0_13
 
+from ultralytics.data.frequency_augment import RandomFrequencyStyle
 from ultralytics.data.fog_augment import RandomFog
 
 DEFAULT_MEAN = (0.0, 0.0, 0.0)
@@ -2354,18 +2355,38 @@ class Format(BaseTransform):
         return {"h": h, "w": w, "cls": cls, "instances": instances, "nl": len(instances) if instances else 0}
 
     def apply_image(self, labels: dict[str, Any], params: dict[str, Any] | None = None) -> dict[str, Any]:
-        """Format image from Numpy array to PyTorch tensor.
-
-        Args:
-            labels (dict[str, Any]): Dictionary containing 'img' as a numpy array.
-            params (dict[str, Any] | None): Unused parameters for API compatibility.
-
-        Returns:
-            (dict[str, Any]): Updated labels with 'img' as a PyTorch tensor.
-        """
+        # """Format image from Numpy array to PyTorch tensor.
+        #
+        # Args:
+        #     labels (dict[str, Any]): Dictionary containing 'img' as a numpy array.
+        #     params (dict[str, Any] | None): Unused parameters for API compatibility.
+        #
+        # Returns:
+        #     (dict[str, Any]): Updated labels with 'img' as a PyTorch tensor.
+        # """
+        # img = labels.pop("img", None)
+        # if img is not None:
+        #     labels["img"] = self._format_img(img)
+        # return labels
         img = labels.pop("img", None)
+        clean_img = labels.pop("fog_clean_img", None)
         if img is not None:
-            labels["img"] = self._format_img(img)
+            if clean_img is None:
+                labels["img"] = self._format_img(img)
+            else:
+                reverse_channels = (
+                        random.uniform(0, 1) > self.bgr
+                        and img.ndim == 3
+                        and img.shape[2] == 3
+                )
+                labels["img"] = self._format_img(
+                    img,
+                    reverse_channels=reverse_channels,
+                )
+                labels["fog_clean_img"] = self._format_img(
+                    clean_img,
+                    reverse_channels=reverse_channels,
+                )
         return labels
 
     def apply_instances(self, labels: dict[str, Any], params: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -2436,35 +2457,50 @@ class Format(BaseTransform):
             labels["batch_idx"] = torch.zeros(nl)
         return labels
 
-    def _format_img(self, img: np.ndarray) -> torch.Tensor:
-        """Format an image for YOLO from a Numpy array to a PyTorch tensor.
-
-        This function performs the following operations:
-        1. Ensures the image has 3 dimensions (adds a channel dimension if needed).
-        2. Transposes the image from HWC to CHW format.
-        3. Optionally reverses the color channels (e.g., BGR to RGB) based on the bgr probability.
-        4. Converts the image to a contiguous array.
-        5. Converts the Numpy array to a PyTorch tensor.
-
-        Args:
-            img (np.ndarray): Input image as a Numpy array with shape (H, W, C) or (H, W).
-
-        Returns:
-            (torch.Tensor): Formatted image as a PyTorch tensor with shape (C, H, W).
-
-        Examples:
-            >>> import numpy as np
-            >>> img = np.random.rand(100, 100, 3)
-            >>> formatted_img = self._format_img(img)
-            >>> print(formatted_img.shape)
-            torch.Size([3, 100, 100])
-        """
+    # def _format_img(self, img: np.ndarray) -> torch.Tensor:
+    #     """Format an image for YOLO from a Numpy array to a PyTorch tensor.
+    #
+    #     This function performs the following operations:
+    #     1. Ensures the image has 3 dimensions (adds a channel dimension if needed).
+    #     2. Transposes the image from HWC to CHW format.
+    #     3. Optionally reverses the color channels (e.g., BGR to RGB) based on the bgr probability.
+    #     4. Converts the image to a contiguous array.
+    #     5. Converts the Numpy array to a PyTorch tensor.
+    #
+    #     Args:
+    #         img (np.ndarray): Input image as a Numpy array with shape (H, W, C) or (H, W).
+    #
+    #     Returns:
+    #         (torch.Tensor): Formatted image as a PyTorch tensor with shape (C, H, W).
+    #
+    #     Examples:
+    #         >>> import numpy as np
+    #         >>> img = np.random.rand(100, 100, 3)
+    #         >>> formatted_img = self._format_img(img)
+    #         >>> print(formatted_img.shape)
+    #         torch.Size([3, 100, 100])
+    #     """
+    #     if len(img.shape) < 3:
+    #         img = img[..., None]
+    #     img = img.transpose(2, 0, 1)
+    #     img = np.ascontiguousarray(img[::-1] if random.uniform(0, 1) > self.bgr and img.shape[0] == 3 else img)
+    #     img = torch.from_numpy(img)
+    #     return img
+    def _format_img(self, img: np.ndarray, reverse_channels: bool | None = None) -> torch.Tensor:
         if len(img.shape) < 3:
             img = img[..., None]
         img = img.transpose(2, 0, 1)
-        img = np.ascontiguousarray(img[::-1] if random.uniform(0, 1) > self.bgr and img.shape[0] == 3 else img)
-        img = torch.from_numpy(img)
-        return img
+        if reverse_channels is None:
+            reverse_channels = (
+                    random.uniform(0, 1) > self.bgr
+                    and img.shape[0] == 3
+            )
+        img = np.ascontiguousarray(
+            img[::-1]
+            if reverse_channels and img.shape[0] == 3
+            else img
+        )
+        return torch.from_numpy(img)
 
     def _format_segments(
         self, instances: Instances, cls: np.ndarray, w: int, h: int
@@ -2853,13 +2889,23 @@ def v8_transforms(dataset, imgsz: int, hyp: IterableSimpleNamespace):
             RandomFlip(direction="vertical", p=hyp.flipud, flip_idx=flip_idx),
             RandomFlip(direction="horizontal", p=hyp.fliplr, flip_idx=flip_idx),
 
+            # Race_Sea: training-only low-frequency style randomization.
+            RandomFrequencyStyle(
+                p=getattr(hyp, "freq_aug_prob", 0.5)
+                if getattr(hyp, "freq_aug", False)
+                else 0.0,
+                radius=getattr(hyp, "freq_radius", 0.1),
+                strength=getattr(hyp, "freq_strength", 0.1),
+            ),
+
             # Race_Sea: training-only non-uniform sea-fog augmentation.
             RandomFog(
                 enabled=getattr(hyp, "fog_aug", False),
                 p=getattr(hyp, "fog_p", 0.25),
-                light_prob=getattr(hyp, "fog_light_prob", 0.55),
-                medium_prob=getattr(hyp, "fog_medium_prob", 0.35),
-                heavy_prob=getattr(hyp, "fog_heavy_prob", 0.10),
+                light_prob=getattr(hyp, "fog_light_prob", 0.20),
+                medium_prob=getattr(hyp, "fog_medium_prob", 0.30),
+                heavy_prob=getattr(hyp, "fog_heavy_prob", 0.50),
+                save_clean=getattr(hyp, "ffc", False),
             ),
         ]
     )  # transforms

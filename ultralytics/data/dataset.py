@@ -415,6 +415,13 @@ class YOLODataset(BaseDataset):
         Returns:
             (dict): Collated batch with stacked tensors.
         """
+        ffc_pairs = []
+        for sample_i, sample in enumerate(batch):
+            clean_img = sample.pop("fog_clean_img", None)
+            if clean_img is not None:
+                ffc_pairs.append(
+                    (sample_i, clean_img)
+                )
         new_batch = {}
         batch = [dict(sorted(b.items())) for b in batch]  # make sure the keys are in the same order
         keys = batch[0].keys()
@@ -433,6 +440,15 @@ class YOLODataset(BaseDataset):
             for i in range(len(new_batch["batch_idx"])):
                 new_batch["batch_idx"][i] += i  # add target image index for build_targets()
             new_batch["batch_idx"] = torch.cat(new_batch["batch_idx"], 0)
+        if ffc_pairs:
+            new_batch["fog_pair_idx"] = torch.tensor(
+                [sample_i for sample_i, _ in ffc_pairs],
+                dtype=torch.long,
+            )
+            new_batch["fog_clean_img"] = torch.stack(
+                [clean_img for _, clean_img in ffc_pairs],
+                dim=0,
+            )
         return new_batch
 
 
