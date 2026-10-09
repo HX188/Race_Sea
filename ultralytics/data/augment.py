@@ -21,7 +21,6 @@ from ultralytics.utils.metrics import bbox_ioa
 from ultralytics.utils.ops import segment2box, xywh2xyxy, xyxyxyxy2xywhr
 from ultralytics.utils.torch_utils import TORCHVISION_0_10, TORCHVISION_0_11, TORCHVISION_0_13
 
-from ultralytics.data.frequency_augment import RandomFrequencyStyle
 from ultralytics.data.fog_augment import RandomFog
 
 DEFAULT_MEAN = (0.0, 0.0, 0.0)
@@ -2807,6 +2806,61 @@ class RandomLoadText(BaseTransform):
         labels["texts"] = params["texts"]
         return labels
 
+
+
+class RandomFrequencyStyle(BaseTransform):
+    """Randomize low-frequency amplitude while keeping phase and annotations fixed.
+
+    This is a single-image FSDR-style amplitude randomization. The image is transformed with a 2D FFT, amplitude
+    inside a centered low-frequency disk is multiplied by per-bin noise, and the original phase is reused for the
+    inverse FFT. Domain appearance can change slightly. Ship geometry stays in the phase and in the untouched
+    high-frequency amplitude, so OBB polygons are not modified.
+    """
+
+    def __init__(self, p: float = 0.5, radius: float = 0.1, strength: float = 0.1) -> None:
+        """Initialize low-frequency amplitude randomization.
+
+        Args:
+            p (float): Probability of applying the augmentation. ``0`` disables it.
+            radius (float): Low-frequency disk radius as a fraction of the Nyquist radius, in ``[0, 1]``.
+            strength (float): Multiplicative amplitude jitter inside that disk. Each bin is scaled by
+                ``Uniform(1 - strength, 1 + strength)``.
+        """
+        self.p = p
+        self.radius = radius
+        self.strength = strength
+
+    def apply_image(self, labels: dict[str, Any], params: dict[str, Any] | None = None) -> dict[str, Any]:
+        """Randomize low-frequency amplitude. Instances, masks, and depth are left unchanged."""
+        if self.p <= 0 or self.strength <= 0 or self.radius <= 0 or random.random() > self.p:
+            return labels
+        img = labels.get("img")
+        if not isinstance(img, np.ndarray) or img.ndim != 3 or img.shape[2] != 3:
+            return labels
+        labels["img"] = self._randomize_amplitude(img)
+        return labels
+
+    def _randomize_amplitude(self, img: np.ndarray) -> np.ndarray:
+        """Return a uint-compatible image with phase preserved and low-frequency amplitude jittered."""
+        original_dtype = img.dtype
+        spatial = img.astype(np.float32, copy=False)
+        spectrum = np.fft.fftshift(np.fft.fft2(spatial, axes=(0, 1)), axes=(0, 1))
+        amplitude = np.abs(spectrum)
+        phase = np.angle(spectrum)
+
+        height, width = spatial.shape[:2]
+        center_y, center_x = height // 2, width // 2
+        yy, xx = np.ogrid[:height, :width]
+        nyquist = 0.5 * min(height, width)
+        disk = (yy - center_y) ** 2 + (xx - center_x) ** 2 <= (self.radius * nyquist) ** 2
+        scale = np.random.uniform(1.0 - self.strength, 1.0 + self.strength, size=amplitude.shape).astype(np.float32)
+        amplitude = np.where(disk[..., None], amplitude * scale, amplitude)
+
+        randomized = np.fft.ifft2(np.fft.ifftshift(amplitude * np.exp(1j * phase), axes=(0, 1)), axes=(0, 1)).real
+        randomized = np.clip(randomized, 0, 255)
+        if original_dtype == np.uint8:
+            return np.rint(randomized).astype(np.uint8)
+        return randomized.astype(original_dtype, copy=False)
 
 def v8_transforms(dataset, imgsz: int, hyp: IterableSimpleNamespace):
     """Apply a series of image transformations for training.
